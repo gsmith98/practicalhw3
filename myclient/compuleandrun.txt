@@ -1,0 +1,2 @@
+javac -cp "*:." MyClient.java
+java -cp "*:." MyClient -p 80 -u muffy -s http://jmessage.server.isi.jhu.edu

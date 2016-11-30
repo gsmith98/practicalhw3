@@ -91,6 +91,8 @@ public class MyClient {
                         System.out.println("Shutting down...");
                         quit = true;
                         break;
+                    case "a": case "attack":
+                        System.out.println("hax");
                     default:
                 }
             }
