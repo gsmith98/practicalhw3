@@ -92,7 +92,9 @@ public class MyClient {
                         quit = true;
                         break;
                     case "a": case "attack":
-                        System.out.println("hax");
+                        String target =  input.split(" ")[1];
+                        JSONObject obj = getRequest(serverurl + "/getMessages/" + clientuser);
+                        System.out.println("hax on " + target);
                     default:
                 }
             }
