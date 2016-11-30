@@ -93,7 +93,14 @@ public class MyClient {
                         break;
                     case "a": case "attack":
                         String target =  input.split(" ")[1];
-                        JSONObject obj = getRequest(serverurl + "/getMessages/" + clientuser);
+                        while(true) {
+                            JSONObject obj = getRequest(serverurl + "/getMessages/" + clientuser);
+                            JSONArray messages = obj.getJSONArray("messages");
+                            if (messages.length() > 0) {
+                                break;
+                            }
+                        }
+                        
                         System.out.println("hax on " + target);
                     default:
                 }
