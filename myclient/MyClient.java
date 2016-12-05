@@ -53,7 +53,7 @@ public class MyClient {
     private static PublicKey pkrsa;
     private static PrivateKey skdsa;
     private static PublicKey pkdsa;
-    private static int messageCounter = 0;
+    //private static int messageCounter = 0;
 
     public static void main(String[] args) {
         try {
@@ -75,20 +75,71 @@ public class MyClient {
 
             clientuser = "" + sender.charAt(0);
             register(); //register as first letter of sender name. "a" for alice
-            String msgToMaul = messages.getJSONObject(0).getString("message");
+            String originalMessage = messages.getJSONObject(0).getString("message");
 
-            int found = huntForByte(msgToMaul, 17); //change the 17th byte until accepted by target (colon)
-            String baseMessage = maulMessage(msgToMaul, (byte) found, 17);
+            int found = huntForByte(originalMessage, 17); //change the 17th byte until accepted by target (colon)
 
             System.out.println("Begin padding oracle attack!");
+            String baseMessage = maulMessage(originalMessage, (byte) found, 17);
             int numbytes = getByteLength(baseMessage);
-            byte[] unknownpad = new byte[numbytes];
-            found = huntForByte(baseMessage, numbytes-1);
-            //found xor pad == 1, so found xor 1 == pad
-            System.out.println(found ^ 1);
-            byte ogCipher = getByte(baseMessage, numbytes-1);
-            byte ogPlaintext = (byte) (ogCipher ^ (found ^ 1));
-            System.out.println(ogPlaintext);
+
+            //This is so that 04 04 04 ?? succeeds only on 01 and not on 04
+            baseMessage = maulMessage(baseMessage, (byte) 0, numbytes - 2);
+            baseMessage = maulMessage(baseMessage, (byte) 0, numbytes - 3);
+
+
+            byte[] unknownpad = new byte[16]; //numbytes];
+            byte[] plaintext = new byte[16]; //numbytes];
+            byte ogCipherByte;
+            byte padByte;
+            byte ogPlaintextByte;
+            byte hunted;
+            for (int i = 1; i <= 16; i++) {
+                //special case for second to last since last could have been 0 or 1 to pass padding
+                if (i == 2) {
+                    int higher = processInbox();
+                    //last padbyte is either lower ^ 0 or lower ^ 1. Same as saying lower or higher
+                    int pen = huntForPenultimate(baseMessage, numbytes - 1, (byte) ((higher^1)^2) );
+                    if (pen < 0) { //higher was correct
+                        System.out.println("Correcting 0/1!!!!");
+                        //fix last iteration
+                        padByte = (byte) (higher ^ 1);
+                        ogCipherByte = getByte(originalMessage, numbytes - 1);
+                        ogPlaintextByte = (byte) (ogCipherByte ^ padByte);
+                        unknownpad[16-1] = padByte;
+                        plaintext[16-1] = ogPlaintextByte;
+
+                        hunted = (byte) (pen + 1000);
+                    } else {//lower is correct
+                        hunted = (byte) (pen - 1000);
+                    }
+                }
+                else {
+                    hunted = (byte) huntForByte(baseMessage, numbytes - i);
+                }
+
+                ogCipherByte = getByte(originalMessage, numbytes - i);
+                padByte = (byte) ( hunted ^  i);
+                ogPlaintextByte = (byte) (ogCipherByte ^ padByte);
+
+                unknownpad[16-i] = padByte;
+                plaintext[16-i] = ogPlaintextByte;
+                System.out.println(padByte + " padbyte" );
+                System.out.println(hunted + " hunted");
+                System.out.println(i + " i");
+                System.out.println(ogCipherByte + "ogCipher");
+                System.out.println(ogPlaintextByte + " ogPlain");
+
+                for (int j = 1; j <= i; j++) {
+                    baseMessage = maulMessage(baseMessage, (byte) (((byte) (i + 1)) ^ unknownpad[16-j]), numbytes - j);
+                }
+            }
+
+            System.out.println("DONE!");
+            System.out.println(unknownpad);
+            System.out.println(new String(unknownpad));
+            System.out.println(plaintext);
+            System.out.println(new String(plaintext));
 
 
 
@@ -100,22 +151,29 @@ public class MyClient {
         }
     }
 
+    private static int huntForPenultimate(String msgToMaul, int lastpos, byte other2) throws NoSuchAlgorithmException, InvalidKeyException, SignatureException, IOException, NoSuchPaddingException, IllegalBlockSizeException, BadPaddingException, InvalidAlgorithmParameterException {
+        String msg2 = maulMessage(msgToMaul, other2 ,lastpos);
+        for (int hunter = -128; hunter < 127; hunter++) {
+            String mauled = maulMessage(msgToMaul, (byte) hunter, lastpos - 1);
+            sendRawMessage(mauled, target, hunter + 1000);
+            String mauled2 = maulMessage(msg2, (byte) hunter, lastpos - 1);
+            sendRawMessage(mauled2, target, hunter - 1000);
+        }
+        int found = -666;
+        while(found == -666) {
+            found = processInbox();
+        }
+        return found;
+    }
+
     private static int huntForByte(String msgToMaul, int pos) throws NoSuchAlgorithmException, InvalidKeyException, SignatureException, IOException, NoSuchPaddingException, IllegalBlockSizeException, BadPaddingException, InvalidAlgorithmParameterException {
-        int found;
-        int hunter = -128;
-        while(true) {
+        for (int hunter = -128; hunter < 127; hunter++) {
             String mauled = maulMessage(msgToMaul, (byte) hunter, pos);
             sendRawMessage(mauled, target, hunter);
-
-            if (hunter % 100 == 0) {
-                //System.out.println("check at " + i);
-                found = processInbox();
-                if (found != -1) {
-                    System.out.println("Succeeded with " + found + "!");
-                    break;
-                }
-            }
-            hunter++;
+        }
+        int found = -666;
+        while(found == -666) {
+            found = processInbox();
         }
         return found;
     }
@@ -125,9 +183,9 @@ public class MyClient {
         JSONArray messages = obj.getJSONArray("messages");
         for (int i = 0; i < messages.length(); i++) {
             int ret = receiveMessage(messages.getJSONObject(i));
-            if (ret != -1) return ret; // read receipt
+            if (ret != -666) return ret; // read receipt
         }
-        return -1; // no read receipt
+        return -666; // no read receipt
     }
 
     private static int receiveMessage(JSONObject messagejson) throws IOException, NoSuchAlgorithmException, InvalidKeyException, SignatureException, NoSuchPaddingException, IllegalBlockSizeException, BadPaddingException, InvalidAlgorithmParameterException {
@@ -143,13 +201,13 @@ public class MyClient {
         if (!(textMessage.equals("") || textMessage.startsWith(">>>READMESSAGE ") || textMessage.startsWith("!!"))) {
             //System.out.println(textMessage);
             String receipt = ">>>READMESSAGE " + messageID;
-            sendMessage(receipt.getBytes(), sender);
+            //sendMessage(receipt.getBytes(), sender);
         } else if (textMessage.startsWith(">>>READMESSAGE ")) {
             System.out.println("Got a receipt for " + textMessage.split(" ")[1]);
             return Integer.parseInt(textMessage.split(" ")[1]);
         }
 
-        return -1;
+        return -666;
     }
 
     private static byte getByte(String message , int pos) {
@@ -203,7 +261,7 @@ public class MyClient {
         return new String(Cbytes);
     }
 
-    private static void sendMessage(byte[] M, String recipient) throws IOException {
+    /*private static void sendMessage(byte[] M, String recipient) throws IOException {
         PublicKey[] pks = decodeRegistrationString(lookupKey(recipient));
         PublicKey targetpkrsa = pks[0];
         PublicKey targetpkdsa = pks[1];
@@ -216,7 +274,7 @@ public class MyClient {
             payload.put("message", encryptedMessage);
             postRequest(serverurl + "/sendMessage/" + clientuser, payload);
         }
-    }
+    }*/
 
     private static void sendRawMessage(String message, String recipient, int id) throws IOException {
         JSONObject payload = new JSONObject();
@@ -225,6 +283,7 @@ public class MyClient {
         payload.put("message", message);
         postRequest(serverurl + "/sendMessage/" + clientuser, payload);
     }
+
 
     private static String decryptMessage(String sender, String message, PublicKey senderpkdsa) {
         try {
